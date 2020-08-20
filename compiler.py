@@ -1,18 +1,16 @@
 import os
 import sys
-from collections import namedtuple
-
+import shutil
 from pathlib import Path
 
-from yaml import load, dump, load_all
 from markdown import markdown
-
+from jinja2 import Template, FileSystemLoader, Environment
+from yaml import load, dump, load_all
 try:
     from yaml import CLoader as Loader, CDumper as Dumper
 except ImportError:
     from yaml import Loader, Dumper
 
-from jinja2 import Template, FileSystemLoader, Environment
 
 # TODO: read from an ignore file or something
 ignore_patterns = ["*.swp"]
@@ -109,17 +107,30 @@ def main(path):
         # note: this makes using the metadata easier from templates
         for key, value in post.metadata.items():
             setattr(post, key, value)
+
+    out_dir = cwd/"_site"
     for name, template in templates_dict.items():
         print(f"Rendering template {name}")
         template = jinja_env.get_template(name)
         rendered = template.render(site=site_data, posts=list(posts_dict.values()))
-        out_dir = cwd/"_site"
         if not out_dir.exists():
             out_dir.mkdir(parents=True)
         out = out_dir/name
         print(f"Writing rendered template to {out}")
         with out.open("w", encoding="utf-8") as outf:
             outf.write(rendered)
+    if site_data and "copy-paths" in site_data:
+        copy_path_names = site_data["copy-paths"]
+        assert(type(copy_path_names) is list)
+        for path_name in copy_path_names:
+            src_path = site_conf.parent / path_name
+            dst_path = out_dir / path_name
+            if src_path.is_dir():
+                print(f"Copying {src_path}{os.path.sep} to {dst_path}{os.path.sep}")
+                shutil.copytree(src_path, dst_path, dirs_exist_ok=True)
+            else:
+                print(f"Copying {src_path} to {dst_path}")
+                shutil.copyfile(src_path, dst_path)
     print("done")
 
 
