@@ -105,6 +105,11 @@ def main(path):
         if post.metadata and "markdown-extensions" in post.metadata:
             markdown_extensions.extend(post.metadata["markdown-extensions"])
         post.html = markdown(post.rendered_text, extensions=markdown_extensions)
+        post.name = name
+        if "title" in post.metadata:
+            post.toc = post.metadata["title"].replace(" ", "-")
+        else:
+            post.toc = post.name.strip(".md").replace(" ", "-")
         # note: this makes using the metadata easier from templates
         for key, value in post.metadata.items():
             setattr(post, key, value)
