@@ -3,6 +3,7 @@ import os
 import sys
 import shutil
 from pathlib import Path
+import argparse
 
 from markdown import markdown
 from jinja2 import Template, FileSystemLoader, Environment
@@ -25,7 +26,6 @@ class Post:
         self.rendered_text = rendered_text
         self.html = ""
 
-
 def serialize_post(source_text):
     # todo get front matter, parse it and put everything in a named tuple
     yaml_docs = source_text.split("---")
@@ -43,14 +43,19 @@ def serialize_post(source_text):
     return Post(source_text, front_matter, body_text, metadata, "")
 
 
-def main(path):
-    if(os.path.exists(path)):
-        cwd = Path(os.path.abspath(path))
+def main():
+    parser = argparse.ArgumentParser(description="Compiles a static site from markdown files and templates")
+    parser.add_argument("-i", "--input-dir", default=None)
+    parser.add_argument("-o", "--output-dir", default="_site")
+    args = parser.parse_args()
+    if args.input_dir and os.path.exists(args.input_dir):
+        working_directory = Path(os.path.abspath(args.input_dir))
     else:
-        cwd = Path(os.path.abspath(os.getcwd()))
-    site_conf = cwd / "site.yaml"
-    templates = cwd / "templates"
-    posts = cwd / "posts"
+        working_directory = Path(os.path.abspath(os.getcwd()))
+    out_dir = Path(os.path.abspath(args.output_dir))
+    site_conf = working_directory / "site.yaml"
+    templates = working_directory / "templates"
+    posts = working_directory / "posts"
     index = templates / "index.html"
     if not templates.exists():
         print("Can't work without templates")
@@ -114,7 +119,6 @@ def main(path):
         for key, value in post.metadata.items():
             setattr(post, key, value)
 
-    out_dir = cwd/"_site"
     for name, template in templates_dict.items():
         print(f"Rendering template {name}")
         template = jinja_env.get_template(name)
@@ -141,7 +145,4 @@ def main(path):
 
 
 if __name__ == "__main__":
-    if(len(sys.argv) > 1):
-        main(sys.argv[1])
-    else:
-        main()
+    main()
