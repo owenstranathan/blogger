@@ -45,31 +45,30 @@ def serialize_post(source_text):
 
 def main():
     parser = argparse.ArgumentParser(description="Compiles a static site from markdown files and templates")
-    parser.add_argument("-i", "--input-dir", default=None)
+    parser.add_argument("path", default=None)
     parser.add_argument("-o", "--output-dir", default="_site")
+    parser.add_argument("-d", "--drafts", default=None)
     args = parser.parse_args()
-    if args.input_dir and os.path.exists(args.input_dir):
-        working_directory = Path(os.path.abspath(args.input_dir))
+    if args.path and os.path.exists(args.path):
+        working_directory = Path(os.path.abspath(args.path))
     else:
         working_directory = Path(os.path.abspath(os.getcwd()))
     out_dir = Path(os.path.abspath(args.output_dir))
     site_conf = working_directory / "site.yaml"
-    templates = working_directory / "templates"
-    posts = working_directory / "posts"
-    index = templates / "index.html"
-    if not templates.exists():
+    templates_dir = working_directory / "templates"
+    posts_dir = working_directory / "posts"
+    drafts_dir = None
+    if args.drafts:
+        drafts_dir = Path(os.path.abspath(args.drafts))
+    if not templates_dir.exists():
         print("Can't work without templates")
         sys.exit(-1)
-    if not index.exists():
-        print("can't work without an index.html")
-        sys.exit(-1)
-    jinja_env = Environment(loader=FileSystemLoader([str(templates), str(posts)]))
-
+    jinja_env = Environment(loader=FileSystemLoader([str(templates_dir), str(posts_dir)]))
     if site_conf.exists():
         with site_conf.open() as infstream:
             site_data = load(infstream, Loader=Loader)
-    assert(templates.exists() and templates.is_dir())
-    assert(posts.exists() and posts.is_dir())
+    assert(templates_dir.exists() and templates_dir.is_dir())
+    assert(posts_dir.exists() and posts_dir.is_dir())
     templates_dict = {}
     posts_dict = {}
     def read_file(f, dic, root=None, serializer = lambda d: d):
@@ -94,8 +93,11 @@ def main():
                     read_file(f, dic, root, serializer=serializer)
             else:
                 read_dir(f, dic, file_ext = file_ext, serializer=serializer)
-    read_dir(templates, templates_dict, root=templates)
-    read_dir(posts, posts_dict, root=posts, file_ext=".md", serializer=serialize_post)
+    read_dir(templates_dir, templates_dict, root=templates_dir)
+    read_dir(posts_dir, posts_dict, root=posts_dir, file_ext=".md", serializer=serialize_post)
+    if drafts_dir:
+        read_dir(drafts_dir, posts_dict, root=drafts_dir, file_ext=".md", serializer=serialize_post)
+
     for name, post in posts_dict.items():
         print(f"Rendering post {name}")
         post_metadata = post.metadata
