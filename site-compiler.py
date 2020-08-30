@@ -2,20 +2,58 @@
 import os
 import sys
 import shutil
+import time
+import signal
+from functools import partial
+from multiprocessing import Process
 from pathlib import Path
 import argparse
+from hashlib import md5
+import socketserver
+import http.server
 
 from markdown import markdown
 from jinja2 import Template, FileSystemLoader, Environment
 from yaml import load, dump, load_all
 try:
-    from yaml import CLoader as Loader, CDumper as Dumper
+    from yaml import CLoader as Loader
 except ImportError:
-    from yaml import Loader, Dumper
+    from yaml import Loader
 
 
 # TODO: read from an ignore file or something
 ignore_patterns = ["*.swp"]
+
+def server(port, directory):
+    handler = partial(http.server.SimpleHTTPRequestHandler, directory=directory)
+    with socketserver.TCPServer(("", port), handler) as httpd:
+        print("serving at port", port)
+        httpd.serve_forever()
+
+
+class DirectoryWatcher():
+    def __init__(self, directory, init=True):
+        self.directory = Path(directory)
+        self.path_hash = dict()
+        if init:
+            self.dirty()
+
+    def dirty(self):
+        dirty = False
+        for path in self.directory.glob("**/*"):
+            try:
+                with path.open("rb") as f:
+                    data = f.read()
+            except PermissionError as pemerr:
+                continue
+            h = md5(data).hexdigest()
+            name = str(path.absolute())
+            dirty = dirty or name not in self.path_hash or self.path_hash[name] != h
+            self.path_hash[name] = h
+        return dirty
+
+def hash_directory(directory):
+    dirs_list = Path(directory).glob("**/*")
 
 class Post:
     def __init__(self, source_text, front_matter, body_text, metadata, rendered_text):
@@ -42,13 +80,7 @@ def serialize_post(source_text):
         print(e)
     return Post(source_text, front_matter, body_text, metadata, "")
 
-
-def main():
-    parser = argparse.ArgumentParser(description="Compiles a static site from markdown files and templates")
-    parser.add_argument("path", default=None)
-    parser.add_argument("-o", "--output-dir", default="_site")
-    parser.add_argument("-d", "--drafts", default=None)
-    args = parser.parse_args()
+def do_compile(args):
     if args.path and os.path.exists(args.path):
         working_directory = Path(os.path.abspath(args.path))
     else:
@@ -107,11 +139,16 @@ def main():
         else:
             post.rendered_text = template.render(site=site_data)
         markdown_extensions = []
+        markdown_extensions_configurations = {}
         if site_data and "markdown-extensions" in site_data:
             markdown_extensions.extend(site_data["markdown-extensions"])
+        if site_data and "markdown-extensions-configurations" in site_data:
+            markdown_extensions_configurations.update(**site_data["markdown-extensions-configurations"])
         if post.metadata and "markdown-extensions" in post.metadata:
             markdown_extensions.extend(post.metadata["markdown-extensions"])
-        post.html = markdown(post.rendered_text, extensions=markdown_extensions)
+        if post.metadata and "markdown-extensions-configurations" in post.metadata:
+            markdown_extensions_configurations.update(**post.metadata["markdown-extensions-configurations"])
+        post.html = markdown(post.rendered_text, extensions=markdown_extensions, extensions_configs=markdown_extensions_configurations)
         post.name = name
         if "title" in post.metadata:
             post.toc = post.metadata["title"].replace(" ", "-")
@@ -143,7 +180,46 @@ def main():
             else:
                 print(f"Copying {src_path} to {dst_path}")
                 shutil.copyfile(src_path, dst_path)
-    print("done")
+
+def main():
+    parser = argparse.ArgumentParser(description="Compiles a static site from markdown files and templates")
+    parser.add_argument("path", default=None)
+    parser.add_argument("-o", "--output-dir", default="_site")
+    parser.add_argument("-d", "--drafts", default=None)
+    parser.add_argument("-w", "--watch", action="store_true")
+    parser.add_argument("-s", "--serve", action="store_true")
+    parser.add_argument("-p", "--port", type=int, default=8000)
+    args = parser.parse_args()
+    if not os.path.exists(args.path):
+        print(f"{args.path} does not exist")
+        sys.exit(-1)
+    do_compile(args)
+    if args.serve or args.watch:
+        server_process = Process(target=server, args=(args.port, args.output_dir))
+        if args.serve:
+            server_process.start()
+        dir_watcher = DirectoryWatcher(os.path.abspath(args.path))
+        quit = False
+        starttime = time.time()
+        every = 1
+        def sig_int(sig, frame):
+            nonlocal quit
+            quit = True
+        def sig_term(sig, frame):
+            nonlocal quit
+            quit = True
+        signal.signal(signal.SIGINT, sig_int)
+        signal.signal(signal.SIGTERM, sig_term)
+        while not quit:
+            if(args.watch):
+                deltatime = time.time() - starttime
+                if deltatime > every:
+                    if dir_watcher.dirty():
+                        do_compile(args)
+                    starttime = time.time()
+        if args.serve:
+            server_process.terminate()
+    print("bye bye!")
 
 
 if __name__ == "__main__":
