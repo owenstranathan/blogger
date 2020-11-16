@@ -109,7 +109,7 @@ class Main():
         if not self.templates_dir.exists():
             self.logger.error("Can't work without templates")
             sys.exit(-1)
-        self.jinja_env = Environment(loader=FileSystemLoader([str(self.templates_dir), str(self.posts_dir)]))
+        self.jinja_env = Environment(loader=FileSystemLoader([str(self.templates_dir), str(self.posts_dir), str(self.working_directory)]))
         if self.site_conf.exists():
             with self.site_conf.open() as infstream:
                 self.site_data = load(infstream, Loader=Loader)
