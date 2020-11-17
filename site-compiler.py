@@ -226,10 +226,19 @@ class Main():
                 dst_path = self.out_dir / path_name
                 if src_path.is_dir():
                     self.logger.info(f"Copying {src_path}{os.path.sep} to {dst_path}{os.path.sep}")
-                    shutil.copytree(src_path, dst_path, dirs_exist_ok=True)
+                    shutil.copytree(src_path, dst_path, dirs_exist_ok=True, ignore=shutil.ignore_patterns(*self.ignore_patterns))
                 else:
-                    self.logger.info(f"Copying {src_path} to {dst_path}")
-                    shutil.copyfile(src_path, dst_path)
+                    ignore=False
+                    for ignore_pattern in self.ignore_patterns:
+                        if fnmatch.fnmatch(path_name, ignore_pattern):
+                            ignore=True
+                            print(f"Ignoring {path_name}")
+                            break
+                    if ignore:
+                        continue
+                    else:
+                        self.logger.info(f"Copying {src_path} to {dst_path}")
+                        shutil.copyfile(src_path, dst_path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compiles a static site from markdown files and templates")
