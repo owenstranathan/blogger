@@ -118,7 +118,7 @@ class Main():
         else:
             self.ignore_patterns = []
         assert(self.templates_dir.exists() and self.templates_dir.is_dir())
-        assert(self.posts_dir.exists() and self.posts_dir.is_dir())
+        #assert(self.posts_dir.exists() and self.posts_dir.is_dir())
 
     def run(self):
         if not os.path.exists(args.path):
@@ -178,7 +178,8 @@ class Main():
                 else:
                     read_dir(f, dic, file_ext = file_ext, serializer=serializer)
         read_dir(self.templates_dir, templates_dict, root=self.templates_dir)
-        read_dir(self.posts_dir, posts_dict, root=self.posts_dir, file_ext=".md", serializer=serialize_post)
+        if(self.posts_dir.exists()):
+            read_dir(self.posts_dir, posts_dict, root=self.posts_dir, file_ext=".md", serializer=serialize_post)
         if self.args.drafts:
             read_dir(self.drafts_dir, posts_dict, root=self.drafts_dir, file_ext=".md", serializer=serialize_post)
         for name, post in posts_dict.items():
