@@ -304,7 +304,7 @@ class Main():
         assert(working_dir.exists())
         requirements_path = working_dir / "requirements.txt"
         venv_path = self.app_data / ".venv"
-        lib_path = venv_path / "Lib" / "site-packages" if sys.platform == "win32" else venv_path / "lib" / f"{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+        lib_path = venv_path / "Lib" / "site-packages" if sys.platform == "win32" else venv_path / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
         if requirements_path.exists():
             do_install = False
             self.logger.info(f"Found extension-requirements at {requirements_path}")
@@ -333,6 +333,7 @@ class Main():
                 # make a new venv in the user folder
                 self.logger.info(f"Making new venv for extension-requirements at {venv_path}")
                 subprocess.check_call([sys.executable, "-m", "venv", str(venv_path)])
+                do_install = True
             local_python = venv_path / "Scripts" / "python.exe" if sys.platform == "win32" else venv_path / "bin" / "python"
             assert(local_python.exists())
             if do_install:
@@ -352,7 +353,6 @@ class Main():
         import extensions # initial import loads the "extensions" module cache entry used on the next line
         # use inspect to get all classes that subclass UserExtension
         self.user_extension_classes = [cls for name, cls in inspect.getmembers(sys.modules["extensions"]) if inspect.isclass(cls) and issubclass(cls, (UserExtension))]
-        self.initialize_user_extensions()
 
     def initialize_user_extensions(self):
         # initialize instance list with list of fresh instaces
