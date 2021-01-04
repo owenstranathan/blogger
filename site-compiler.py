@@ -13,6 +13,12 @@ from hashlib import md5
 import socketserver
 import http.server
 import logging
+import subprocess
+import inspect
+from abc import ABC
+import re
+import inspect
+from functools import wraps
 
 from markdown import markdown
 from jinja2 import Template, FileSystemLoader, Environment
@@ -22,15 +28,31 @@ try:
 except ImportError:
     from yaml import Loader
 
-
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+
+# courtesy of Nadi Alramli via SO, Thanks! https://stackoverflow.com/questions/1389180/automatically-initialize-instance-variables
+# updated to use python3 getfullargspec
+def initializer(func):
+    """
+    Automatically assigns the parameters to the class of the function it wraps
+    """
+    fullspec = inspect.getfullargspec(func)
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        for name, arg in list(zip(fullspec.args[1:], args)) + list(kwargs.items()): # starting the zip at idx 1 excludes `self` and then we just grab the kwargs
+            setattr(self, name, arg)
+        if fullspec.defaults:
+            for name, default in zip(reversed(fullspec.args), reversed(fullspec.defaults)):
+                if not hasattr(self, name):
+                    setattr(self, name, default)
+        func(self, *args, *kwargs)
+    return wrapper
 
 def server(port, directory):
     handler = partial(http.server.SimpleHTTPRequestHandler, directory=directory)
     with socketserver.TCPServer(("", port), handler) as httpd:
         logging.getLogger("Server").info(f"serving at port {port}")
         httpd.serve_forever()
-
 
 class DirectoryWatcher():
     def __init__(self, directory, ignore_patterns=None, init=True):
@@ -90,6 +112,24 @@ def serialize_post(source_text):
     return Post(source_text, front_matter, body_text, metadata, "")
 
 
+#TODO (owen) DOC: This can be imported by the user via
+#`from __main__ import UserExtension` anything from this file can be imported in this way
+# WARNING: this is kind of a dangerous pattern because it means any kind of user code can be run, so don't use
+# site-compiler to compile strange websites that you didn't write
+class UserExtension(ABC):
+    """
+    A user definied extension to the site-compiler
+    """
+    def __init__(self, logger, working_dir, out_dir, site_data, jinja_env):
+        pass
+
+    def forEachPost(self, name, post):
+        pass
+
+    def finalize(self):
+        pass
+
+
 class Main():
     def __init__(self, args):
         self.logger = logging.getLogger("main")
@@ -98,6 +138,12 @@ class Main():
             self.working_directory = Path(os.path.abspath(args.path))
         else:
             self.working_directory = Path(os.path.abspath(os.getcwd()))
+        if not self.working_directory.exists():
+            self.logger.error(f"Given path: {self.working_directory} does not exist!")
+            raise Exception("Bad main working directory!")
+        self.app_data = self.working_directory/ ".site-compiler" # TODO (owen): put this in AppData on windows and where ever is the equal on unix
+        if not self.app_data.exists():
+            self.app_data.mkdir(parents=True)
         self.out_dir = Path(os.path.abspath(args.output_dir))
         self.site_conf = self.working_directory / "site.yaml"
         self.templates_dir = self.working_directory / "templates"
@@ -119,6 +165,7 @@ class Main():
             self.ignore_patterns = []
         assert(self.templates_dir.exists() and self.templates_dir.is_dir())
         assert(self.posts_dir.exists() and self.posts_dir.is_dir())
+        self.load_user_extensions()
 
     def run(self):
         if not os.path.exists(args.path):
@@ -153,6 +200,7 @@ class Main():
         self.logger.info("bye bye!")
 
     def compile(self):
+        self.initialize_user_extensions()
         templates_dict = {}
         posts_dict = {}
         def read_file(f, dic, root=None, serializer = lambda d: d):
@@ -208,6 +256,9 @@ class Main():
             # note: this makes using the metadata easier from templates
             for key, value in post.metadata.items():
                 setattr(post, key, value)
+            # run user extensions on each post
+            for extension in self.user_extension_instances:
+                extension.forEachPost(name, post)
         for name, template in templates_dict.items():
             self.logger.info(f"Rendering template {name}")
             template = self.jinja_env.get_template(name)
@@ -232,13 +283,79 @@ class Main():
                     for ignore_pattern in self.ignore_patterns:
                         if fnmatch.fnmatch(path_name, ignore_pattern):
                             ignore=True
-                            print(f"Ignoring {path_name}")
+                            self.logger.info(f"Ignoring {path_name}")
                             break
                     if ignore:
                         continue
                     else:
                         self.logger.info(f"Copying {src_path} to {dst_path}")
                         shutil.copyfile(src_path, dst_path)
+        for extension in self.user_extension_instances:
+            extension.finalize()
+
+    def load_user_extensions(self):
+        """
+        NOTES:
+        2 user extensions on the same site cannot have conflicting site-package requirements
+        """
+        # path is path to top level user folder (i.e. the top level site folder)
+        working_dir = Path(self.working_directory)
+        assert(working_dir.exists())
+        requirements_path = working_dir / "requirements.txt"
+        venv_path = self.app_data / ".venv"
+        lib_path = venv_path / "Lib" / "site-packages" if sys.platform == "win32" else venv_path / "lib" / f"{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+        if requirements_path.exists():
+            do_install = False
+            self.logger.info(f"Found extension-requirements at {requirements_path}")
+            # check to see if site local venv exists and if requirements already installed
+            if venv_path.exists():
+                self.logger.info("Existing venv found")
+                if lib_path.exists():
+                    self.logger.info("Existing site-packages found")
+                    sys.path.append(str(lib_path))
+                    import pkg_resources # late import insures that the site local venv site-packages are read by pkg_resources
+                    with requirements_path.open("r") as inf:
+                        requires = [str(r) for r in pkg_resources.parse_requirements(inf.read())]
+                    try:
+                        pkg_resources.require(requires) # throws if requirements met in current path
+                        self.logger.info("All requirements satisfied. Skipping installation")
+                        do_install = False # redundant but informative
+                    except (pkg_resources.DistributionNotFound, pkg_resources.VersionConflict) as err:
+                        reason = re.sub(r'((?<=[a-z])[A-Z]|(?<!\A)[A-Z](?=[a-z]))', r' \1', err.__class__.__name__)
+                        self.logger.info(f"Requirement {err.req} not met. Reason: \"{reason}\"")
+                        do_install = True
+                    # TODO (owen): there are 2 more possible exceptions "UnkownExtra" and "ExtractionError" I've never seen these in common practace and don't know what they mean but I should probably handle them here
+                else:
+                    self.logger.info("No site packages found in existing venv")
+                    do_install = True
+            else:
+                # make a new venv in the user folder
+                self.logger.info(f"Making new venv for extension-requirements at {venv_path}")
+                subprocess.check_call([sys.executable, "-m", "venv", str(venv_path)])
+            local_python = venv_path / "Scripts" / "python.exe" if sys.platform == "win32" else venv_path / "bin" / "python"
+            assert(local_python.exists())
+            if do_install:
+                # install user extension requirements to site local virtualenv
+                self.logger.info(f"Installing extension requirements to site venv")
+                cmd = [str(local_python), "-m", "pip", "install", "-r", str(requirements_path)]
+                self.logger.info(f"Running subprocess: {' '.join(cmd)}")
+                with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as proc:
+                    for c in iter(proc.stdout.readline,  b''):
+                        print(c.decode("utf-8"))
+                    proc.communicate()
+            # append the user site-packages to the current executable path (this is needed to successfully import user extension module)
+            assert(lib_path.exists())
+            sys.path.append(str(lib_path))
+        sys.path.append(str(working_dir)) # add user folder to system path
+        # TODO (owen) DOCS: Document that the extension module should me named "extensions" and that it can be any python importable, i.e. package or module
+        import extensions # initial import loads the "extensions" module cache entry used on the next line
+        # use inspect to get all classes that subclass UserExtension
+        self.user_extension_classes = [cls for name, cls in inspect.getmembers(sys.modules["extensions"]) if inspect.isclass(cls) and issubclass(cls, (UserExtension))]
+        self.initialize_user_extensions()
+
+    def initialize_user_extensions(self):
+        # initialize instance list with list of fresh instaces
+        self.user_extension_instances = [e(logging.getLogger(f"{e.__name__}"), self.working_directory, self.out_dir, self.site_data, self.jinja_env) for e in self.user_extension_classes]
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compiles a static site from markdown files and templates")
