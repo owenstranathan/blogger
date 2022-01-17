@@ -19,16 +19,24 @@ from abc import ABC
 import re
 import inspect
 from functools import wraps
+from datetime import date
 
 from markdown import markdown
 from jinja2 import Template, FileSystemLoader, Environment
 from yaml import load, dump, load_all
+
+from appdirs import user_data_dir
+
 try:
     from yaml import CLoader as Loader
 except ImportError:
     from yaml import Loader
 
-logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+logging.basicConfig(stream=sys.stdout, level=logging.CRITICAL)
+APPNAME = "blogger"
+AUTHOR = "wabisoft"
+APPDATA = Path(user_data_dir(appname=APPNAME, appauthor=AUTHOR))
+PATHSEP = os.path.sep
 
 # courtesy of Nadi Alramli via SO, Thanks! https://stackoverflow.com/questions/1389180/automatically-initialize-instance-variables
 # updated to use python3 getfullargspec
@@ -78,7 +86,7 @@ class DirectoryWatcher():
             try:
                 with path.open("rb") as f:
                     data = f.read()
-            except PermissionError as pemerr:
+            except PermissionError:
                 continue
             h = md5(data).hexdigest()
             name = str(path.absolute())
@@ -115,10 +123,10 @@ def serialize_post(source_text):
 #TODO (owen) DOC: This can be imported by the user via
 #`from __main__ import UserExtension` anything from this file can be imported in this way
 # WARNING: this is kind of a dangerous pattern because it means any kind of user code can be run, so don't use
-# site-compiler to compile strange websites that you didn't write
+# blogger to compile strange websites that you didn't write
 class UserExtension(ABC):
     """
-    A user definied extension to the site-compiler
+    A user definied extension to the blogger app
     """
     def __init__(self, logger, working_dir, out_dir, site_data, jinja_env):
         pass
@@ -133,7 +141,6 @@ class UserExtension(ABC):
 class Main():
     def __init__(self, args):
         self.logger = logging.getLogger("main")
-        self.args = args
         if args.path and os.path.exists(args.path):
             self.working_directory = Path(os.path.abspath(args.path))
         else:
@@ -141,18 +148,19 @@ class Main():
         if not self.working_directory.exists():
             self.logger.error(f"Given path: {self.working_directory} does not exist!")
             raise Exception("Bad main working directory!")
-        self.app_data = self.working_directory/ ".site-compiler" # TODO (owen): put this in AppData on windows and where ever is the equal on unix
+        self.app_data = APPDATA
         if not self.app_data.exists():
             self.app_data.mkdir(parents=True)
-        self.out_dir = Path(os.path.abspath(args.output_dir))
+        if hasattr(args, "output_dir") and args.output_dir:
+            self.out_dir = Path(os.path.abspath(args.output_dir))
+        else:
+            self.out_dir = APPDATA / "_site"
         self.site_conf = self.working_directory / "site.yaml"
         self.templates_dir = self.working_directory / "templates"
         self.posts_dir = self.working_directory / "posts"
-        if self.args.drafts:
-            self.drafts_dir = self.working_directory / "drafts"
-        else:
-            self.drafts_dir = None
+        self.drafts_dir = self.working_directory / "drafts"
         if not self.templates_dir.exists():
+            # TODO (owen): I think for commands like "draft and publish we don't need to check this but not sure if moving it to compile will break stuff
             self.logger.error("Can't work without templates")
             sys.exit(-1)
         self.jinja_env = Environment(loader=FileSystemLoader([str(self.templates_dir), str(self.posts_dir), str(self.working_directory)]))
@@ -167,16 +175,16 @@ class Main():
         self.load_user_extensions()
         #assert(self.posts_dir.exists() and self.posts_dir.is_dir()) # NOTE (owen): no need to assert that post exist because this need not be used to compile a blog
 
-    def run(self):
-        if not os.path.exists(args.path):
-            self.logger.error(f"{args.path} does not exist")
-            sys.exit(-1)
-        self.compile()
-        if self.args.serve or self.args.watch:
-            server_process = Process(target=server, args=(self.args.port, self.args.output_dir))
-            if self.args.serve:
+    def run(self, args):
+        # if not os.path.exists(args.path):
+        #     self.logger.error(f"{args.path} does not exist")
+        #     sys.exit(-1)
+        self.compile(args)
+        if args.serve or args.watch:
+            server_process = Process(target=server, args=(args.port, self.out_dir))
+            if args.serve:
                 server_process.start()
-            self.dir_watcher = DirectoryWatcher(os.path.abspath(self.args.path), ignore_patterns=self.ignore_patterns)
+            self.dir_watcher = DirectoryWatcher(self.working_directory, ignore_patterns=self.ignore_patterns)
             quit = False
             starttime = time.time()
             every = 1
@@ -189,17 +197,17 @@ class Main():
             signal.signal(signal.SIGINT, sig_int)
             signal.signal(signal.SIGTERM, sig_term)
             while not quit:
-                if(self.args.watch):
+                if(args.watch):
                     deltatime = time.time() - starttime
                     if deltatime > every:
                         if self.dir_watcher.dirty():
-                            self.compile()
+                            self.compile(args)
                         starttime = time.time()
-            if self.args.serve:
+            if args.serve:
                 server_process.terminate()
         self.logger.info("bye bye!")
 
-    def compile(self):
+    def compile(self, args):
         self.initialize_user_extensions()
         templates_dict = {}
         posts_dict = {}
@@ -228,11 +236,10 @@ class Main():
         read_dir(self.templates_dir, templates_dict, root=self.templates_dir)
         if(self.posts_dir.exists()):
             read_dir(self.posts_dir, posts_dict, root=self.posts_dir, file_ext=".md", serializer=serialize_post)
-        if self.args.drafts:
+        if args.drafts:
             read_dir(self.drafts_dir, posts_dict, root=self.drafts_dir, file_ext=".md", serializer=serialize_post)
         for name, post in posts_dict.items():
             self.logger.info(f"Rendering post {name}")
-            post_metadata = post.metadata
             template = self.jinja_env.from_string(post.body_text)
             if post.metadata:
                 post.rendered_text = template.render(site=self.site_data, **post.metadata)
@@ -277,7 +284,7 @@ class Main():
                 src_path = self.site_conf.parent / path_name
                 dst_path = self.out_dir / path_name
                 if src_path.is_dir():
-                    self.logger.info(f"Copying {src_path}{os.path.sep} to {dst_path}{os.path.sep}")
+                    self.logger.info(f"Copying {src_path}{PATHSEP} to {dst_path}{PATHSEP}")
                     shutil.copytree(src_path, dst_path, dirs_exist_ok=True, ignore=shutil.ignore_patterns(*self.ignore_patterns))
                 else:
                     ignore=False
@@ -307,40 +314,40 @@ class Main():
         lib_path = venv_path / "Lib" / "site-packages" if sys.platform == "win32" else venv_path / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
         if requirements_path.exists():
             do_install = False
-            self.logger.info(f"Found extension-requirements at {requirements_path}")
+            self.logger.debug(f"Found extension-requirements at {requirements_path}")
             # check to see if site local venv exists and if requirements already installed
             if venv_path.exists():
-                self.logger.info("Existing venv found")
+                self.logger.debug("Existing venv found")
                 if lib_path.exists():
-                    self.logger.info("Existing site-packages found")
+                    self.logger.debug("Existing site-packages found")
                     sys.path.append(str(lib_path))
                     import pkg_resources # late import insures that the site local venv site-packages are read by pkg_resources
                     with requirements_path.open("r") as inf:
                         requires = [str(r) for r in pkg_resources.parse_requirements(inf.read())]
                     try:
                         pkg_resources.require(requires) # throws if requirements met in current path
-                        self.logger.info("All requirements satisfied. Skipping installation")
+                        self.logger.debug("All requirements satisfied. Skipping installation")
                         do_install = False # redundant but informative
                     except (pkg_resources.DistributionNotFound, pkg_resources.VersionConflict) as err:
                         reason = re.sub(r'((?<=[a-z])[A-Z]|(?<!\A)[A-Z](?=[a-z]))', r' \1', err.__class__.__name__)
-                        self.logger.info(f"Requirement {err.req} not met. Reason: \"{reason}\"")
+                        self.logger.error(f"Requirement {err.req} not met. Reason: \"{reason}\"")
                         do_install = True
                     # TODO (owen): there are 2 more possible exceptions "UnkownExtra" and "ExtractionError" I've never seen these in common practace and don't know what they mean but I should probably handle them here
                 else:
-                    self.logger.info("No site packages found in existing venv")
+                    self.logger.debug("No site packages found in existing venv")
                     do_install = True
             else:
                 # make a new venv in the user folder
-                self.logger.info(f"Making new venv for extension-requirements at {venv_path}")
+                self.logger.debug(f"Making new venv for extension-requirements at {venv_path}")
                 subprocess.check_call([sys.executable, "-m", "venv", str(venv_path)])
                 do_install = True
             local_python = venv_path / "Scripts" / "python.exe" if sys.platform == "win32" else venv_path / "bin" / "python"
             assert(local_python.exists())
             if do_install:
                 # install user extension requirements to site local virtualenv
-                self.logger.info(f"Installing extension requirements to site venv")
+                self.logger.debug(f"Installing extension requirements to site venv")
                 cmd = [str(local_python), "-m", "pip", "install", "-r", str(requirements_path)]
-                self.logger.info(f"Running subprocess: {' '.join(cmd)}")
+                self.logger.debug(f"Running subprocess: {' '.join(cmd)}")
                 with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as proc:
                     for c in iter(proc.stdout.readline,  b''):
                         print(c.decode("utf-8"))
@@ -355,17 +362,105 @@ class Main():
         self.user_extension_classes = [cls for name, cls in inspect.getmembers(sys.modules["extensions"]) if inspect.isclass(cls) and issubclass(cls, (UserExtension))]
 
     def initialize_user_extensions(self):
-        # initialize instance list with list of fresh instaces
+        # initialize instance list with list of fresh instances
         self.user_extension_instances = [e(logging.getLogger(f"{e.__name__}"), self.working_directory, self.out_dir, self.site_data, self.jinja_env) for e in self.user_extension_classes]
 
+    def post(self, args):
+        # iterate drafts and prompt user for selection, then confirm title and date and move to the posts folder with correct name (YYYY-MM-DD-title.md)
+        drafts = list(self.drafts_dir.iterdir())
+        print(f"Found {len(drafts)} drafts:")
+        for index, d in enumerate(drafts):
+            print(f"\t {index+1}) {d.name}")
+        index = 0
+        while True:
+            index = input(f"Which would you like to post? [1-{len(drafts)} or q to quit]: ")
+            if index == "q":
+                sys.exit(0)
+            try:
+                index = int(index)
+            except ValueError:
+                self.logger.critical("Invalid input.")
+                continue
+            if index > len(drafts) or index < 1:
+                self.logger.critical(f"{index} is invalid. Out of range!")
+                continue
+            break
+        draft = drafts[index]
+        post = None
+        with draft.open() as inf:
+            post = serialize_post(inf.read())
+        breakpoint()
+        # TODO (owen): verify post date and title and move file to posts/ directory
+        print(post)
+
+    def draft(self, args):
+        # TODO: make a new markdown file named according to our scheme (YYYY-MM-DD-Title-DRAFT.md) or something.
+        # with front matter prefilled (title, date, etc) and put it in the draft folder
+        today = date.today().strftime('%Y-%m-%d')
+        title = args.title or "draft"
+        FRONTMATTER = f"""
+---
+date: {today}
+title: "{title}"
+---
+        """
+        name = f"{today}-{title}.md"
+        out = self.drafts_dir / name
+        index = 0
+        while out.exists():
+            index += 1
+            name = f"{today}-{title}({index}).md"
+            out = self.drafts_dir / name
+        self.logger.info(f"Creating draft file {out}")
+        with out.open("w", encoding="utf-8") as outf:
+            outf.write(FRONTMATTER)
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Compiles a static site from markdown files and templates")
+    parser = argparse.ArgumentParser(description="Compiles a static blog site from markdown files and templates and comes with useful utilities for blog writing")
+    subparsers = parser.add_subparsers(dest="subparsers", title="Valid subcommands")
     parser.add_argument("path", default=None)
-    parser.add_argument("-o", "--output-dir", default="_site")
-    parser.add_argument("-d", "--drafts", action="store_true")
-    parser.add_argument("-w", "--watch", action="store_true")
-    parser.add_argument("-s", "--serve", action="store_true")
-    parser.add_argument("-p", "--port", type=int, default=8000)
+    parser.add_argument("-v", "--verbose", action="count", default=0)
+
+    # run
+    run_parser = subparsers.add_parser("run")
+    run_parser.add_argument("-w", "--watch", action="store_true")
+    run_parser.add_argument("-s", "--serve", action="store_true")
+    run_parser.add_argument("-p", "--port", type=int, default=8000)
+    run_parser.add_argument("-d", "--drafts", action="store_true", help=f"Include the {PATHSEP}drafts directory of the site")
+    run_parser.add_argument("-o", "--output-dir", default="_site", help=f"If chosen command outputs files place them in the give directory. Default is {APPDATA}{PATHSEP}_site.")
+
+    # compile
+    compile_parser = subparsers.add_parser("compile")
+    compile_parser.add_argument("-d", "--drafts", action="store_true", help=f"Include the {PATHSEP}drafts directory of the site")
+    compile_parser.add_argument("-o", "--output-dir", default="_site", help=f"If chosen command outputs files place them in the give directory. Default is {APPDATA}{PATHSEP}_site.")
+
+    # draft
+    draft_parser = subparsers.add_parser("draft")
+    draft_parser.add_argument("-t", "--title", default="draft", help="The title of the draft post. This can be changed later before you post")
+
+    # post
+    post_parser = subparsers.add_parser("post")
+
+
+    def run(main, args):
+        main.run(args)
+    def draft(main, args):
+        main.draft(args)
+    def compile(main, args):
+        main.compile(args)
+    def post(main, args):
+        main.post(args)
+
+    draft_parser.set_defaults(func=draft)
+    run_parser.set_defaults(func=run)
+    compile_parser.set_defaults(func=compile)
+    post_parser.set_defaults(func=post)
     args = parser.parse_args()
+    log_level = logging.CRITICAL
+    levels = [logging.CRITICAL, logging.ERROR, logging.WARNING, logging.INFO, logging.DEBUG]
+    if args.verbose:
+        verbosity = max(0, min(args.verbose, len(levels)-1))
+        log_level = levels[verbosity]
+        logging.getLogger().setLevel(log_level)
     main = Main(args)
-    main.run()
+    args.func(main, args)

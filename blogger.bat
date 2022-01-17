@@ -18,4 +18,4 @@ IF %ERRORLEVEL% NEQ 0 (
 )
 
 
-"%python%" "%dirname%/site-compiler.py" %*
+"%python%" "%dirname%/blogger.py" %*
