@@ -19,7 +19,7 @@ from abc import ABC
 import re
 import inspect
 from functools import wraps
-from datetime import date
+from datetime import date, datetime
 
 from markdown import markdown
 from jinja2 import Template, FileSystemLoader, Environment
@@ -389,9 +389,41 @@ class Main():
         post = None
         with draft.open() as inf:
             post = serialize_post(inf.read())
-        breakpoint()
         # TODO (owen): verify post date and title and move file to posts/ directory
-        print(post)
+        def get_answer(yn_question):
+            while True:
+                resp = input(f"{yn_question} [y/n]: ")
+                if resp in ["y", "Y", "n", "N"]:
+                    return resp.lower() == "y"
+        def validate(validate_what, data):
+            print(f"Curret {validate_what} is \"{data}\"")
+            return get_answer("Is this ok?")
+        while not validate("title", post.metadata["title"]):
+            post.metadata["title"] = input("Enter title: ")
+        while not validate("date", post.metadata["date"]):
+            while True:
+                d = input("Enter date (YYYY-MM-DD): ")
+                try:
+                    dt = datetime.strptime(d, "%Y-%m-%d")
+                except ValueError:
+                    self.logger.critical("Invalid date fromat")
+                    continue
+                post.metadata["date"] = dt.strftime("%Y-%m-%d")
+                break
+        filename = f"{post.metadata['date']}-{post.metadata['title']}.md"
+        f = self.posts_dir / filename
+        post.front_matter = dump(post.metadata)
+        print(f"Writing post to {f}")
+        assert(not f.exists())
+        with f.open('w') as outf:
+            outf.write("---\n")
+            outf.write(post.front_matter)
+            outf.write("---\n")
+            outf.write("\n")
+            outf.write(post.body_text)
+        if get_answer("Post written. Delete draft?"):
+            print(f"Deleteing {draft}")
+            os.remove(draft)
 
     def draft(self, args):
         # TODO: make a new markdown file named according to our scheme (YYYY-MM-DD-Title-DRAFT.md) or something.
