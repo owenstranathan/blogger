@@ -25,7 +25,7 @@ from markdown import markdown
 from jinja2 import Template, FileSystemLoader, Environment
 from yaml import load, dump, load_all
 
-from appdirs import user_data_dir
+from appvars import *
 
 try:
     from yaml import CLoader as Loader
@@ -33,10 +33,6 @@ except ImportError:
     from yaml import Loader
 
 logging.basicConfig(stream=sys.stdout, level=logging.CRITICAL)
-APPNAME = "blogger"
-AUTHOR = "wabisoft"
-APPDATA = Path(user_data_dir(appname=APPNAME, appauthor=AUTHOR))
-PATHSEP = os.path.sep
 
 # courtesy of Nadi Alramli via SO, Thanks! https://stackoverflow.com/questions/1389180/automatically-initialize-instance-variables
 # updated to use python3 getfullargspec
@@ -94,7 +90,6 @@ class DirectoryWatcher():
             self.path_hash[name] = h
         return dirty
 
-
 class Post:
     def __init__(self, source_text, front_matter, body_text, metadata, rendered_text):
         self.source_text = source_text
@@ -131,7 +126,20 @@ class UserExtension(ABC):
     def __init__(self, logger, working_dir, out_dir, site_data, jinja_env):
         pass
 
-    def forEachPost(self, name, post):
+    def pre_render_post(self, name, post):
+        pass
+
+    def post_render_post(self, name, post):
+        pass
+
+    def should_skip_template(self, name, template, posts):
+        """
+        This function gives the user-extension the ability to short cut the template rendering offered by  blogger.
+        Using this function you can short cut the regular template rendering and render the template yourself and write it where ever you like
+        return FALSE to let blogger render and write out the template
+        return TRUE to tell blogger to skip the template and instead let you handle it
+        NOTE: there can be multiple user extensions runninng and anyone of them may skip the template
+        """
         pass
 
     def finalize(self):
@@ -148,13 +156,13 @@ class Main():
         if not self.working_directory.exists():
             self.logger.error(f"Given path: {self.working_directory} does not exist!")
             raise Exception("Bad main working directory!")
-        self.app_data = APPDATA
+        self.app_data = APPDATA_LOCAL / self.working_directory.name
         if not self.app_data.exists():
             self.app_data.mkdir(parents=True)
         if hasattr(args, "output_dir") and args.output_dir:
             self.out_dir = Path(os.path.abspath(args.output_dir))
         else:
-            self.out_dir = APPDATA / "_site"
+            self.out_dir = self.app_data / "_site"
         self.site_conf = self.working_directory / "site.yaml"
         self.templates_dir = self.working_directory / "templates"
         self.posts_dir = self.working_directory / "posts"
@@ -162,6 +170,7 @@ class Main():
         if not self.templates_dir.exists():
             # TODO (owen): I think for commands like "draft and publish we don't need to check this but not sure if moving it to compile will break stuff
             self.logger.error("Can't work without templates")
+            self.logger.critical("Specified or current working directory is not properly formatted to use blogger. Please see documentation (TODO (owen): Write docs)")
             sys.exit(-1)
         self.jinja_env = Environment(loader=FileSystemLoader([str(self.templates_dir), str(self.posts_dir), str(self.working_directory)]))
         if self.site_conf.exists():
@@ -240,6 +249,8 @@ class Main():
             read_dir(self.drafts_dir, posts_dict, root=self.drafts_dir, file_ext=".md", serializer=serialize_post)
         for name, post in posts_dict.items():
             self.logger.info(f"Rendering post {name}")
+            for extension in self.user_extension_instances:
+                extension.pre_render_post(name, post)
             template = self.jinja_env.from_string(post.body_text)
             if post.metadata:
                 post.rendered_text = template.render(site=self.site_data, **post.metadata)
@@ -266,10 +277,19 @@ class Main():
                 setattr(post, key, value)
             # run user extensions on each post
             for extension in self.user_extension_instances:
-                extension.forEachPost(name, post)
+                extension.post_render_post(name, post)
         for name, template in templates_dict.items():
-            self.logger.info(f"Rendering template {name}")
             template = self.jinja_env.get_template(name)
+            def run_user_extensions_for_template():
+                for extension in self.user_extension_instances:
+                    result = extension.should_skip_template(name, template, posts_dict)
+                    if result:
+                        self.logger.info(f"{extension.__class__.__name__} has skipped template {name}")
+                    yield result
+            if any([r for r in run_user_extensions_for_template()]): # any user extesion can shortcut the template rendering
+                self.logger.info(f"Skipping template {name}")
+                continue
+            self.logger.info(f"Rendering template {name}")
             rendered = template.render(site=self.site_data, posts=list(posts_dict.values()))
             if not self.out_dir.exists():
                 self.out_dir.mkdir(parents=True)
@@ -430,12 +450,10 @@ class Main():
         # with front matter prefilled (title, date, etc) and put it in the draft folder
         today = date.today().strftime('%Y-%m-%d')
         title = args.title or "draft"
-        FRONTMATTER = f"""
----
+        FRONTMATTER = f"""---
 date: {today}
 title: "{title}"
----
-        """
+---"""
         name = f"{today}-{title}.md"
         out = self.drafts_dir / name
         index = 0
@@ -449,22 +467,23 @@ title: "{title}"
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compiles a static blog site from markdown files and templates and comes with useful utilities for blog writing")
-    subparsers = parser.add_subparsers(dest="subparsers", title="Valid subcommands")
+    subparsers = parser.add_subparsers(dest="subparsers", title="commands")
     parser.add_argument("path", default=None)
     parser.add_argument("-v", "--verbose", action="count", default=0)
 
+    out_arg_help = f"If chosen command outputs files place them in the give directory. Default is {APPDATA_LOCAL}{PATHSEP}[SITE_DIRECTORY_NAME]{PATHSEP}_site."
     # run
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("-w", "--watch", action="store_true")
     run_parser.add_argument("-s", "--serve", action="store_true")
     run_parser.add_argument("-p", "--port", type=int, default=8000)
     run_parser.add_argument("-d", "--drafts", action="store_true", help=f"Include the {PATHSEP}drafts directory of the site")
-    run_parser.add_argument("-o", "--output-dir", default="_site", help=f"If chosen command outputs files place them in the give directory. Default is {APPDATA}{PATHSEP}_site.")
+    run_parser.add_argument("-o", "--output-dir", help=out_arg_help)
 
     # compile
     compile_parser = subparsers.add_parser("compile")
     compile_parser.add_argument("-d", "--drafts", action="store_true", help=f"Include the {PATHSEP}drafts directory of the site")
-    compile_parser.add_argument("-o", "--output-dir", default="_site", help=f"If chosen command outputs files place them in the give directory. Default is {APPDATA}{PATHSEP}_site.")
+    compile_parser.add_argument("-o", "--output-dir", help=out_arg_help)
 
     # draft
     draft_parser = subparsers.add_parser("draft")
@@ -473,14 +492,17 @@ if __name__ == "__main__":
     # post
     post_parser = subparsers.add_parser("post")
 
-
-    def run(main, args):
+    def run(args):
+        main = Main(args)
         main.run(args)
-    def draft(main, args):
+    def draft(args):
+        main = Main(args)
         main.draft(args)
-    def compile(main, args):
+    def compile(args):
+        main = Main(args)
         main.compile(args)
-    def post(main, args):
+    def post(args):
+        main = Main(args)
         main.post(args)
 
     draft_parser.set_defaults(func=draft)
@@ -494,5 +516,4 @@ if __name__ == "__main__":
         verbosity = max(0, min(args.verbose, len(levels)-1))
         log_level = levels[verbosity]
         logging.getLogger().setLevel(log_level)
-    main = Main(args)
-    args.func(main, args)
+    args.func(args)
