@@ -387,7 +387,10 @@ class Main():
 
     def post(self, args):
         # iterate drafts and prompt user for selection, then confirm title and date and move to the posts folder with correct name (YYYY-MM-DD-title.md)
-        drafts = list(self.drafts_dir.iterdir())
+        exclude_paths = []
+        for pattern in self.ignore_patterns:
+            exclude_paths.extend(self.drafts_dir.rglob(pattern))
+        drafts = [d for d in self.drafts_dir.iterdir() if d not in exclude_paths]
         print(f"Found {len(drafts)} drafts:")
         for index, d in enumerate(drafts):
             print(f"\t {index+1}) {d.name}")
@@ -405,7 +408,7 @@ class Main():
                 self.logger.critical(f"{index} is invalid. Out of range!")
                 continue
             break
-        draft = drafts[index]
+        draft = drafts[index-1]
         post = None
         with draft.open() as inf:
             post = serialize_post(inf.read())
