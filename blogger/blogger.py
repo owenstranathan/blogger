@@ -14,18 +14,16 @@ import socketserver
 import http.server
 import logging
 import subprocess
-import inspect
-from abc import ABC
 import re
 import inspect
-from functools import wraps
 from datetime import date, datetime
 
 from markdown import markdown
 from jinja2 import Template, FileSystemLoader, Environment
 from yaml import load, dump, load_all
 
-from appvars import *
+from .appvars import APPDATA_LOCAL, PATHSEP
+from .utils import UserExtension
 
 try:
     from yaml import CLoader as Loader
@@ -33,24 +31,6 @@ except ImportError:
     from yaml import Loader
 
 logging.basicConfig(stream=sys.stdout, level=logging.CRITICAL)
-
-# courtesy of Nadi Alramli via SO, Thanks! https://stackoverflow.com/questions/1389180/automatically-initialize-instance-variables
-# updated to use python3 getfullargspec
-def initializer(func):
-    """
-    Automatically assigns the parameters to the class of the function it wraps
-    """
-    fullspec = inspect.getfullargspec(func)
-    @wraps(func)
-    def wrapper(self, *args, **kwargs):
-        for name, arg in list(zip(fullspec.args[1:], args)) + list(kwargs.items()): # starting the zip at idx 1 excludes `self` and then we just grab the kwargs
-            setattr(self, name, arg)
-        if fullspec.defaults:
-            for name, default in zip(reversed(fullspec.args), reversed(fullspec.defaults)):
-                if not hasattr(self, name):
-                    setattr(self, name, default)
-        func(self, *args, *kwargs)
-    return wrapper
 
 def server(port, directory):
     handler = partial(http.server.SimpleHTTPRequestHandler, directory=directory)
@@ -114,36 +94,6 @@ def serialize_post(source_text):
         logging.getLogger("main").error(e)
     return Post(source_text, front_matter, body_text, metadata, "")
 
-
-#TODO (owen) DOC: This can be imported by the user via
-#`from __main__ import UserExtension` anything from this file can be imported in this way
-# WARNING: this is kind of a dangerous pattern because it means any kind of user code can be run, so don't use
-# blogger to compile strange websites that you didn't write
-class UserExtension(ABC):
-    """
-    A user definied extension to the blogger app
-    """
-    def __init__(self, logger, working_dir, out_dir, site_data, jinja_env):
-        pass
-
-    def pre_render_post(self, name, post):
-        pass
-
-    def post_render_post(self, name, post):
-        pass
-
-    def should_skip_template(self, name, template, posts):
-        """
-        This function gives the user-extension the ability to short cut the template rendering offered by  blogger.
-        Using this function you can short cut the regular template rendering and render the template yourself and write it where ever you like
-        return FALSE to let blogger render and write out the template
-        return TRUE to tell blogger to skip the template and instead let you handle it
-        NOTE: there can be multiple user extensions runninng and anyone of them may skip the template
-        """
-        pass
-
-    def finalize(self):
-        pass
 
 
 class Main():
@@ -330,6 +280,8 @@ class Main():
         working_dir = Path(self.working_directory)
         assert(working_dir.exists())
         requirements_path = working_dir / "requirements.txt"
+        if not requirements_path.exists() and (working_dir/"extensions").is_dir():
+            requirements_path = working_dir / "extensions"/"requirements.txt"
         venv_path = self.app_data / ".venv"
         lib_path = venv_path / "Lib" / "site-packages" if sys.platform == "win32" else venv_path / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
         if requirements_path.exists():
@@ -379,7 +331,7 @@ class Main():
         # TODO (owen) DOCS: Document that the extension module should me named "extensions" and that it can be any python importable, i.e. package or module
         import extensions # initial import loads the "extensions" module cache entry used on the next line
         # use inspect to get all classes that subclass UserExtension
-        self.user_extension_classes = [cls for name, cls in inspect.getmembers(sys.modules["extensions"]) if inspect.isclass(cls) and issubclass(cls, (UserExtension))]
+        self.user_extension_classes = [cls for name, cls in inspect.getmembers(sys.modules["extensions"]) if inspect.isclass(cls) and issubclass(cls, (UserExtension)) and cls is not UserExtension]
 
     def initialize_user_extensions(self):
         # initialize instance list with list of fresh instances
@@ -425,18 +377,24 @@ class Main():
             post.metadata["title"] = input("Enter title: ")
         while not validate("date", post.metadata["date"]):
             while True:
-                d = input("Enter date (YYYY-MM-DD): ")
-                try:
-                    dt = datetime.strptime(d, "%Y-%m-%d")
-                except ValueError:
-                    self.logger.critical("Invalid date fromat")
-                    continue
-                post.metadata["date"] = dt.strftime("%Y-%m-%d")
+                d = input("Enter date (YYYY-MM-DD) or \"[t]oday\" for local clock date: ")
+                if d.lower() in ["t", "today"]:
+                    post.metadata["date"] = date.today()
+                else:
+                    try:
+                        dt = datetime.strptime(d, "%Y-%m-%d")
+                    except ValueError:
+                        self.logger.critical("Invalid date fromat")
+                        continue
+                    post.metadata["date"] = dt.date()
                 break
         filename = f"{post.metadata['date']}-{post.metadata['title']}.md"
         f = self.posts_dir / filename
         post.front_matter = dump(post.metadata)
         print(f"Writing post to {f}")
+        if f.exists():
+            self.logger.critical(f"{f} already exists in the post/ folder. Cannnot over write post with this utility.")
+            sys.exit(1)
         assert(not f.exists())
         with f.open('w') as outf:
             outf.write("---\n")

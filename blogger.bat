@@ -1,7 +1,8 @@
 @echo off
 
 set dirname=%~dp0
-for /f "delims=" %%i in ('python "%dirname%\appvars.py"') do set RESULT=%%i
+set PYTHONPATH=%dirname%
+for /f "delims=" %%i in ('python -m blogger.appvars') do set RESULT=%%i
 SET venv=%RESULT%\app\.venv
 
 if not exist %venv% (
@@ -19,4 +20,4 @@ IF %ERRORLEVEL% NEQ 0 (
 )
 
 
-"%python%" "%dirname%/blogger.py" %*
+"%python%" -m blogger.blogger %*
