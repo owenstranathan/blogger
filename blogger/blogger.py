@@ -36,7 +36,10 @@ def server(port, directory):
     handler = partial(http.server.SimpleHTTPRequestHandler, directory=directory)
     with socketserver.TCPServer(("", port), handler) as httpd:
         logging.getLogger("Server").info(f"serving at port {port}")
-        httpd.serve_forever()
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            return;
 
 class DirectoryWatcher():
     def __init__(self, directory, ignore_patterns=None, init=True):
@@ -134,37 +137,46 @@ class Main():
         self.load_user_extensions()
         #assert(self.posts_dir.exists() and self.posts_dir.is_dir()) # NOTE (owen): no need to assert that post exist because this need not be used to compile a blog
 
+    def load_site_data(self):
+        if self.site_conf.exists():
+            with self.site_conf.open() as infstream:
+                self.site_data = load(infstream, Loader=Loader)
+        if self.site_data and "ignore-patterns" in self.site_data:
+            self.ignore_patterns = self.site_data["ignore-patterns"]
+        else:
+            self.ignore_patterns = []
+
     def run(self, args):
-        # if not os.path.exists(args.path):
-        #     self.logger.error(f"{args.path} does not exist")
-        #     sys.exit(-1)
         self.compile(args)
-        if args.serve or args.watch:
-            server_process = Process(target=server, args=(args.port, self.out_dir))
-            if args.serve:
-                server_process.start()
-            self.dir_watcher = DirectoryWatcher(self.working_directory, ignore_patterns=self.ignore_patterns)
-            quit = False
-            starttime = time.time()
-            every = 1
-            def sig_int(sig, frame):
-                nonlocal quit
-                quit = True
-            def sig_term(sig, frame):
-                nonlocal quit
-                quit = True
-            signal.signal(signal.SIGINT, sig_int)
-            signal.signal(signal.SIGTERM, sig_term)
-            while not quit:
-                if(args.watch):
-                    deltatime = time.time() - starttime
-                    if deltatime > every:
-                        if self.dir_watcher.dirty():
-                            self.compile(args)
-                        starttime = time.time()
-            if args.serve:
-                server_process.terminate()
-        self.logger.info("bye bye!")
+        server_process = Process(target=server, args=(args.port, self.out_dir))
+        server_process.start()
+        self.dir_watcher = DirectoryWatcher(self.working_directory, ignore_patterns=self.ignore_patterns)
+        quit = False
+        starttime = time.time()
+        every = 1
+        def sig_int(sig, frame):
+            nonlocal quit
+            server_process.terminate()
+            quit = True
+        def sig_term(sig, frame):
+            nonlocal quit
+            server_process.terminate()
+            quit = True
+        signal.signal(signal.SIGINT, sig_int)
+        signal.signal(signal.SIGTERM, sig_term)
+        while not quit:
+            deltatime = time.time() - starttime
+            if deltatime > every:
+                if self.dir_watcher.dirty():
+                    # try and catch so the thing keeps going
+                    try:
+                        self.load_site_data()
+                        self.compile(args)
+                    except Exception as e:
+                        self.logger.critical(f"Unhandled error compiling site. Will keep watching but this change did not compile successfully")
+                        self.logger.exception(e)
+                starttime = time.time()
+        self.logger.info("Run terminated")
 
     def compile(self, args):
         self.initialize_user_extensions()
@@ -434,9 +446,7 @@ if __name__ == "__main__":
 
     out_arg_help = f"If chosen command outputs files place them in the give directory. Default is {APPDATA_LOCAL}{PATHSEP}[SITE_DIRECTORY_NAME]{PATHSEP}_site."
     # run
-    run_parser = subparsers.add_parser("run")
-    run_parser.add_argument("-w", "--watch", action="store_true")
-    run_parser.add_argument("-s", "--serve", action="store_true")
+    run_parser = subparsers.add_parser("run", help="Compile the site and serve it locally on a give port or default:8000. Watch the site files and recompile changes")
     run_parser.add_argument("-p", "--port", type=int, default=8000)
     run_parser.add_argument("-d", "--drafts", action="store_true", help=f"Include the {PATHSEP}drafts directory of the site")
     run_parser.add_argument("-o", "--output-dir", help=out_arg_help)
@@ -477,4 +487,9 @@ if __name__ == "__main__":
         verbosity = max(0, min(args.verbose, len(levels)-1))
         log_level = levels[verbosity]
         logging.getLogger().setLevel(log_level)
-    args.func(args)
+    else:
+        print(f"Log level set to {logging.getLevelName(logging.root.level)}. You may not be seeing everything you want. Use -v, -vv, -vvv, or -vvvv to see more log messages")
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        sys.exit(0)
