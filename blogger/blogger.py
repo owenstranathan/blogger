@@ -18,7 +18,7 @@ import re
 import inspect
 from datetime import date, datetime
 
-from markdown import markdown
+from markdown import markdown, inlinepatterns, Extension as MarkdownExtension
 from jinja2 import Template, FileSystemLoader, Environment
 from yaml import load, dump, load_all
 
@@ -32,6 +32,14 @@ except ImportError:
 
 logging.basicConfig(stream=sys.stdout, level=logging.CRITICAL)
 
+
+class StrikeThroughExtension(MarkdownExtension):
+    def extendMarkdown(self, md):
+        md.inlinePatterns.register(
+            inlinepatterns.SimpleTagPattern(
+                r"(~{2})(.+?)(~{2})", # ~~ optionally anything at least once ~~
+                "del"), "blogger-strikethrough", 100)
+
 def server(port, directory):
     handler = partial(http.server.SimpleHTTPRequestHandler, directory=directory)
     with socketserver.TCPServer(("", port), handler) as httpd:
@@ -39,7 +47,7 @@ def server(port, directory):
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
-            return;
+            return
 
 class DirectoryWatcher():
     def __init__(self, directory, ignore_patterns=None, init=True):
@@ -218,7 +226,7 @@ class Main():
                 post.rendered_text = template.render(site=self.site_data, **post.metadata)
             else:
                 post.rendered_text = template.render(site=self.site_data)
-            markdown_extensions = []
+            markdown_extensions = [StrikeThroughExtension()]
             markdown_extensions_configurations = {}
             if self.site_data and "markdown-extensions" in self.site_data:
                 markdown_extensions.extend(self.site_data["markdown-extensions"])
@@ -400,7 +408,8 @@ class Main():
                         continue
                     post.metadata["date"] = dt.date()
                 break
-        filename = f"{post.metadata['date']}-{post.metadata['title']}.md"
+        title = post.metadata["title"].lower().replace(" ", "-")
+        filename = f"{post.metadata['date']}-{title}.md"
         f = self.posts_dir / filename
         post.front_matter = dump(post.metadata)
         print(f"Writing post to {f}")
