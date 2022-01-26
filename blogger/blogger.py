@@ -143,7 +143,6 @@ class Main():
             self.ignore_patterns = []
         assert(self.templates_dir.exists() and self.templates_dir.is_dir())
         self.load_user_extensions()
-        #assert(self.posts_dir.exists() and self.posts_dir.is_dir()) # NOTE (owen): no need to assert that post exist because this need not be used to compile a blog
 
     def load_site_data(self):
         if self.site_conf.exists():
@@ -216,7 +215,10 @@ class Main():
         if(self.posts_dir.exists()):
             read_dir(self.posts_dir, posts_dict, root=self.posts_dir, file_ext=".md", serializer=serialize_post)
         if args.drafts:
-            read_dir(self.drafts_dir, posts_dict, root=self.drafts_dir, file_ext=".md", serializer=serialize_post)
+            if self.drafts_dir.exists():
+                read_dir(self.drafts_dir, posts_dict, root=self.drafts_dir, file_ext=".md", serializer=serialize_post)
+            else:
+                self.logger.critical(f"Cannot compile with drafts! {self.drafts_dir} does not exists.")
         for name, post in posts_dict.items():
             self.logger.info(f"Rendering post {name}")
             for extension in self.user_extension_instances:
@@ -391,7 +393,7 @@ class Main():
                 if resp in ["y", "Y", "n", "N"]:
                     return resp.lower() == "y"
         def validate(validate_what, data):
-            print(f"Curret {validate_what} is \"{data}\"")
+            print(f"Current {validate_what} is \"{data}\"")
             return get_answer("Is this ok?")
         while not validate("title", post.metadata["title"]):
             post.metadata["title"] = input("Enter title: ")
@@ -409,6 +411,8 @@ class Main():
                     post.metadata["date"] = dt.date()
                 break
         title = post.metadata["title"].lower().replace(" ", "-")
+        punc_reg = r"[^\w|^\-\s]"
+        title = re.sub(punc_reg, "", title);
         filename = f"{post.metadata['date']}-{title}.md"
         f = self.posts_dir / filename
         post.front_matter = dump(post.metadata)
@@ -438,6 +442,8 @@ title: "{title}"
 ---"""
         name = f"{today}-{title}.md"
         out = self.drafts_dir / name
+        if not out.parent.exists():
+            out.parent.mkdir(parents=True)
         index = 0
         while out.exists():
             index += 1
