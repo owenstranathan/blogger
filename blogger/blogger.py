@@ -82,7 +82,8 @@ class DirectoryWatcher():
         return dirty
 
 class Post:
-    def __init__(self, source_text, front_matter, body_text, metadata, rendered_text):
+    def __init__(self, filepath, source_text, front_matter, body_text, metadata, rendered_text):
+        self.filepath = filepath
         self.source_text = source_text
         self.front_matter = front_matter
         self.body_text = body_text
@@ -90,7 +91,7 @@ class Post:
         self.rendered_text = rendered_text
         self.html = ""
 
-def serialize_post(source_text):
+def serialize_post(filepath, source_text):
     yaml_docs = source_text.split("---")
     if len(yaml_docs)>2:
         front_matter = yaml_docs[1]
@@ -101,9 +102,10 @@ def serialize_post(source_text):
     try:
         metadata = next(load_all(source_text, Loader=Loader))
     except Exception as e:
-        metadata = None
-        logging.getLogger("main").error(e)
-    return Post(source_text, front_matter, body_text, metadata, "")
+        return None
+        # metadata = None
+        # logging.getLogger("main").error(e)
+    return Post(filepath, source_text, front_matter, body_text, metadata, "")
 
 
 
@@ -189,14 +191,18 @@ class Main():
         self.initialize_user_extensions()
         templates_dict = {}
         posts_dict = {}
-        def read_file(f, dic, root=None, serializer = lambda d: d):
+        def read_file(f, dic, root=None, serializer = lambda f, d: d):
             with f.open() as inf:
                 if root:
                     name = str(f.relative_to(root))
                 else:
                     name = str(f.absolue())
-                dic[name] = serializer(inf.read())
-        def read_dir(d, dic, root=None, file_ext=None, serializer = lambda d: d):
+                result = serializer(f, inf.read())
+                if result:
+                    dic[name] = result
+                else:
+                    self.logger.critical(f"Failed to deserialize {f.name}. Skipping.")
+        def read_dir(d, dic, root=None, file_ext=None, serializer = lambda f, d: d):
             assert(d.is_dir())
             exclude_paths = []
             for pattern in self.ignore_patterns:
@@ -292,6 +298,7 @@ class Main():
                         shutil.copyfile(src_path, dst_path)
         for extension in self.user_extension_instances:
             extension.finalize()
+        print("Compilation complete")
 
     def load_user_extensions(self):
         """
@@ -366,7 +373,11 @@ class Main():
         for d in self.drafts_dir.iterdir():
             if d not in exclude_paths:
                 with d.open() as inf:
-                    yield serialize_post(inf.read())
+                    result = serialize_post(d, inf.read())
+                    if result:
+                        yield result
+                    else:
+                        self.logger.critical(f"Failed to deserialize {d.name}. Skipping")
 
     def post(self, args):
         # iterate drafts and prompt user for selection, then confirm title and date and move to the posts folder with correct name (YYYY-MM-DD-title.md)
@@ -389,6 +400,7 @@ class Main():
                 continue
             break
         post = drafts[index-1]
+        draft_filepath = post.filepath
         # TODO (owen): verify post date and title and move file to posts/ directory
         def get_answer(yn_question):
             while True:
@@ -430,9 +442,9 @@ class Main():
             outf.write("---\n")
             outf.write("\n")
             outf.write(post.body_text)
-        if get_answer("Post written. Delete draft?"):
-            print(f"Deleteing {draft}")
-            os.remove(draft)
+        if get_answer(f"Post written. Delete draft {draft_filepath.name}?"):
+            print(f"Deleteing {draft_filepath.name}")
+            os.remove(draft_filepath)
 
     def new_draft(self, args):
         # TODO: make a new markdown file named according to our scheme (YYYY-MM-DD-Title-DRAFT.md) or something.
@@ -455,37 +467,45 @@ title: "{title}"
             index += 1
             name = f"{today}-{clean_title}({index}).md"
             out = self.drafts_dir / name
-        self.logger.info(f"Creating draft file {out}")
+        print(f"Creating draft file {out}")
         with out.open("w", encoding="utf-8") as outf:
             outf.write(FRONTMATTER)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Compiles a static blog site from markdown files and templates and comes with useful utilities for blog writing")
+    parser = argparse.ArgumentParser(description="Compiles a static blog site from markdown files and templates and \
+comes with useful utilities for blog writing")
     subparsers = parser.add_subparsers(dest="subparsers", title="commands")
-    parser.add_argument("path", default=None)
-    parser.add_argument("-v", "--verbose", action="count", default=0)
 
-    out_arg_help = f"If chosen command outputs files place them in the give directory. Default is {APPDATA_LOCAL}{PATHSEP}[SITE_DIRECTORY_NAME]{PATHSEP}_site."
+    # parent
+    parent_parser = argparse.ArgumentParser(add_help=False)
+    parent_parser.add_argument("path", default=None, nargs="?")
+    parent_parser.add_argument("-v", "--verbose", action="count", default=0)
+
+    # run & compile parent
+    run_and_compile_parent_parser = argparse.ArgumentParser(add_help=False)
+    run_and_compile_parent_parser.add_argument("-d", "--drafts", action="store_true", help=f"Include the {PATHSEP}drafts directory of the site")
+    run_and_compile_parent_parser.add_argument("-o",
+        "--output-dir",
+        help=f"If chosen command outputs files place them in the give directory. \
+Default is {APPDATA_LOCAL}{PATHSEP}[SITE_DIRECTORY_NAME]{PATHSEP}_site.")
+
     # run
-    run_parser = subparsers.add_parser("run", help="Compile the site and serve it locally on a give port or default:8000. Watch the site files and recompile changes")
+    run_parser = subparsers.add_parser("run", help="Compile the site and serve it locally on a give port or\
+default:8000. Watch the site files and recompile changes", parents=[parent_parser, run_and_compile_parent_parser])
     run_parser.add_argument("-p", "--port", type=int, default=8000)
-    run_parser.add_argument("-d", "--drafts", action="store_true", help=f"Include the {PATHSEP}drafts directory of the site")
-    run_parser.add_argument("-o", "--output-dir", help=out_arg_help)
 
     # compile
-    compile_parser = subparsers.add_parser("compile")
-    compile_parser.add_argument("-d", "--drafts", action="store_true", help=f"Include the {PATHSEP}drafts directory of the site")
-    compile_parser.add_argument("-o", "--output-dir", help=out_arg_help)
+    compile_parser = subparsers.add_parser("compile", parents=[parent_parser, run_and_compile_parent_parser])
 
     # draft
-    draft_parser = subparsers.add_parser("draft")
+    draft_parser = subparsers.add_parser("draft", parents=[parent_parser])
     draft_subparsers = draft_parser.add_subparsers(dest="subcommands", title="subcommands")
     draft_list_parser = draft_subparsers.add_parser("list")
     draft_new_parser = draft_subparsers.add_parser("new")
     draft_new_parser.add_argument("-t", "--title", default="draft", help="The title of the draft post. This can be changed later before you post")
 
     # post
-    post_parser = subparsers.add_parser("post")
+    post_parser = subparsers.add_parser("post", parents=[parent_parser])
 
     def run(args):
         main = Main(args)
