@@ -359,15 +359,21 @@ class Main():
         # initialize instance list with list of fresh instances
         self.user_extension_instances = [e(logging.getLogger(f"{e.__name__}"), self.working_directory, self.out_dir, self.site_data, self.jinja_env) for e in self.user_extension_classes]
 
-    def post(self, args):
-        # iterate drafts and prompt user for selection, then confirm title and date and move to the posts folder with correct name (YYYY-MM-DD-title.md)
+    def get_drafts(self):
         exclude_paths = []
         for pattern in self.ignore_patterns:
             exclude_paths.extend(self.drafts_dir.rglob(pattern))
-        drafts = [d for d in self.drafts_dir.iterdir() if d not in exclude_paths]
+        for d in self.drafts_dir.iterdir():
+            if d not in exclude_paths:
+                with d.open() as inf:
+                    yield serialize_post(inf.read())
+
+    def post(self, args):
+        # iterate drafts and prompt user for selection, then confirm title and date and move to the posts folder with correct name (YYYY-MM-DD-title.md)
+        drafts = list(self.get_drafts())
         print(f"Found {len(drafts)} drafts:")
         for index, d in enumerate(drafts):
-            print(f"\t {index+1}) {d.name}")
+            print(f"\t {index+1}) {d.metadata['date']} - {d.metadata['title']}")
         index = 0
         while True:
             index = input(f"Which would you like to post? [1-{len(drafts)} or q to quit]: ")
@@ -382,10 +388,7 @@ class Main():
                 self.logger.critical(f"{index} is invalid. Out of range!")
                 continue
             break
-        draft = drafts[index-1]
-        post = None
-        with draft.open() as inf:
-            post = serialize_post(inf.read())
+        post = drafts[index-1]
         # TODO (owen): verify post date and title and move file to posts/ directory
         def get_answer(yn_question):
             while True:
@@ -431,23 +434,26 @@ class Main():
             print(f"Deleteing {draft}")
             os.remove(draft)
 
-    def draft(self, args):
+    def new_draft(self, args):
         # TODO: make a new markdown file named according to our scheme (YYYY-MM-DD-Title-DRAFT.md) or something.
         # with front matter prefilled (title, date, etc) and put it in the draft folder
         today = date.today().strftime('%Y-%m-%d')
         title = args.title or "draft"
+        punc_reg = r"[^\w|^\-\s]"
+        clean_title = re.sub(punc_reg, "", title);
+        clean_title = clean_title.lower().replace(" ", "-")
         FRONTMATTER = f"""---
 date: {today}
 title: "{title}"
 ---"""
-        name = f"{today}-{title}.md"
+        name = f"{today}-{clean_title}.md"
         out = self.drafts_dir / name
         if not out.parent.exists():
             out.parent.mkdir(parents=True)
         index = 0
         while out.exists():
             index += 1
-            name = f"{today}-{title}({index}).md"
+            name = f"{today}-{clean_title}({index}).md"
             out = self.drafts_dir / name
         self.logger.info(f"Creating draft file {out}")
         with out.open("w", encoding="utf-8") as outf:
@@ -473,7 +479,10 @@ if __name__ == "__main__":
 
     # draft
     draft_parser = subparsers.add_parser("draft")
-    draft_parser.add_argument("-t", "--title", default="draft", help="The title of the draft post. This can be changed later before you post")
+    draft_subparsers = draft_parser.add_subparsers(dest="subcommands", title="subcommands")
+    draft_list_parser = draft_subparsers.add_parser("list")
+    draft_new_parser = draft_subparsers.add_parser("new")
+    draft_new_parser.add_argument("-t", "--title", default="draft", help="The title of the draft post. This can be changed later before you post")
 
     # post
     post_parser = subparsers.add_parser("post")
@@ -481,9 +490,20 @@ if __name__ == "__main__":
     def run(args):
         main = Main(args)
         main.run(args)
-    def draft(args):
+    def new_draft(args):
         main = Main(args)
-        main.draft(args)
+        main.new_draft(args)
+    def list_drafts(args):
+        main = Main(args)
+        for d in main.get_drafts():
+            print(f"{d.metadata['date']} - {d.metadata['title']}")
+    def draft(args):
+        if args.subcommands == "list":
+            list_drafts(args)
+        elif args.subcommands == "new":
+            new_draft(args)
+        else:
+            draft_parser.print_help()
     def compile(args):
         main = Main(args)
         main.compile(args)
@@ -502,8 +522,6 @@ if __name__ == "__main__":
         verbosity = max(0, min(args.verbose, len(levels)-1))
         log_level = levels[verbosity]
         logging.getLogger().setLevel(log_level)
-    else:
-        print(f"Log level set to {logging.getLevelName(logging.root.level)}. You may not be seeing everything you want. Use -v, -vv, -vvv, or -vvvv to see more log messages")
     try:
         args.func(args)
     except KeyboardInterrupt:
